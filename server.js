@@ -1,10 +1,14 @@
 const express = require("express");
 const cors = require("cors");
+const http = require("http");
+const WebSocket = require("ws");
 
 const app = express();
-
 app.use(cors());
 app.use(express.json());
+
+const server = http.createServer(app);
+const wss = new WebSocket.Server({ server });
 
 const salas = new Map();
 
@@ -18,12 +22,18 @@ function gerarCodigo() {
     return codigo;
 }
 
+// Página de teste
+app.get("/", (req, res) => {
+    res.send("Rocket Brasil WebSocket ONLINE 🚀");
+});
+
 // Criar sala
 app.post("/criar-sala", (req, res) => {
     const codigo = gerarCodigo();
 
     salas.set(codigo, {
-        jogadores: 1
+        jogadores: [],
+        sockets: []
     });
 
     console.log("Sala criada:", codigo);
@@ -38,25 +48,21 @@ app.post("/criar-sala", (req, res) => {
 app.post("/entrar-sala", (req, res) => {
     const codigo = req.body.codigo;
 
-    if (!salas.has(codigo)) {
+    const sala = salas.get(codigo);
+
+    if (!sala) {
         return res.json({
             sucesso: false,
             mensagem: "Sala não encontrada"
         });
     }
 
-    const sala = salas.get(codigo);
-
-    if (sala.jogadores >= 2) {
+    if (sala.sockets.length >= 2) {
         return res.json({
             sucesso: false,
             mensagem: "Sala cheia"
         });
     }
-
-    sala.jogadores++;
-
-    console.log("Jogador entrou:", codigo);
 
     res.json({
         sucesso: true,
@@ -64,12 +70,98 @@ app.post("/entrar-sala", (req, res) => {
     });
 });
 
-const PORT = process.env.PORT || 3000;
+// WebSocket
+wss.on("connection", (socket) => {
+    console.log("Novo jogador conectado!");
 
-app.get("/", (req, res) => {
-    res.send("Rocket Brasil Server ONLINE 🚀");
+    socket.on("message", (message) => {
+        try {
+            const dados = JSON.parse(message);
+
+            // Jogador entra no WebSocket de uma sala
+            if (dados.tipo === "entrar_sala") {
+
+                const codigo = dados.codigo;
+                const sala = salas.get(codigo);
+
+                if (!sala) {
+                    socket.send(JSON.stringify({
+                        tipo: "erro",
+                        mensagem: "Sala não encontrada"
+                    }));
+
+                    return;
+                }
+
+                if (sala.sockets.length >= 2) {
+                    socket.send(JSON.stringify({
+                        tipo: "erro",
+                        mensagem: "Sala cheia"
+                    }));
+
+                    return;
+                }
+
+                sala.sockets.push(socket);
+
+                socket.sala = codigo;
+
+                console.log(
+                    "Jogador entrou na sala:",
+                    codigo
+                );
+
+                // Avisar o jogador que entrou
+                socket.send(JSON.stringify({
+                    tipo: "entrou_sala",
+                    codigo: codigo
+                }));
+
+                // Se já existem 2 jogadores
+                if (sala.sockets.length === 2) {
+
+                    console.log(
+                        "Sala pronta:",
+                        codigo
+                    );
+
+                    sala.sockets.forEach((player) => {
+                        player.send(JSON.stringify({
+                            tipo: "sala_pronta"
+                        }));
+                    });
+                }
+            }
+        } catch (erro) {
+            console.log("Mensagem inválida:", erro);
+        }
+    });
+
+    socket.on("close", () => {
+
+        const codigo = socket.sala;
+
+        if (!codigo) return;
+
+        const sala = salas.get(codigo);
+
+        if (!sala) return;
+
+        sala.sockets = sala.sockets.filter(
+            (player) => player !== socket
+        );
+
+        console.log(
+            "Jogador saiu da sala:",
+            codigo
+        );
+    });
 });
 
-app.listen(PORT, "0.0.0.0", () => {
-    console.log(`🚀 Servidor Rocket Brasil rodando na porta ${PORT}!`);
+const PORT = process.env.PORT || 3000;
+
+server.listen(PORT, "0.0.0.0", () => {
+    console.log(
+        `🚀 Rocket Brasil Server rodando na porta ${PORT}`
+    );
 });
