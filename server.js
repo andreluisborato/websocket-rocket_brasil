@@ -14,13 +14,17 @@ const wss = new WebSocket.Server({
     server: server
 });
 
-// ==============================
-// SALAS
-// ==============================
-
 const salas = new Map();
 
+let proximoJogador = 1;
+
+
+// ==========================
+// GERAR CÓDIGO
+// ==========================
+
 function gerarCodigo() {
+
     let codigo;
 
     do {
@@ -31,16 +35,16 @@ function gerarCodigo() {
 }
 
 
-// ==============================
+// ==========================
 // CRIAR SALA
-// ==============================
+// ==========================
 
 app.post("/criar-sala", (req, res) => {
 
     const codigo = gerarCodigo();
 
     salas.set(codigo, {
-        jogadores: new Set()
+        jogadores: new Map()
     });
 
     console.log("🎮 Sala criada:", codigo);
@@ -52,22 +56,16 @@ app.post("/criar-sala", (req, res) => {
 });
 
 
-// ==============================
-// VERIFICAR / ENTRAR NA SALA
-// ==============================
+// ==========================
+// ENTRAR NA SALA
+// ==========================
 
 app.post("/entrar-sala", (req, res) => {
 
     const codigo = req.body.codigo;
 
-    if (!codigo) {
-        return res.json({
-            sucesso: false,
-            mensagem: "Código não informado"
-        });
-    }
-
     if (!salas.has(codigo)) {
+
         return res.json({
             sucesso: false,
             mensagem: "Sala não encontrada"
@@ -77,15 +75,13 @@ app.post("/entrar-sala", (req, res) => {
     const sala = salas.get(codigo);
 
     if (sala.jogadores.size >= 2) {
+
         return res.json({
             sucesso: false,
             mensagem: "Sala cheia"
         });
     }
 
-    console.log("🔎 Sala encontrada:", codigo);
-
-    // A entrada real será feita pelo WebSocket.
     res.json({
         sucesso: true,
         codigo: codigo
@@ -93,15 +89,16 @@ app.post("/entrar-sala", (req, res) => {
 });
 
 
-// ==============================
+// ==========================
 // WEBSOCKET
-// ==============================
+// ==========================
 
 wss.on("connection", (ws) => {
 
-    console.log("🔌 Novo WebSocket conectado");
+    console.log("🔌 WebSocket conectado");
 
     ws.sala = null;
+    ws.jogador_id = null;
 
 
     ws.on("message", (message) => {
@@ -110,7 +107,7 @@ wss.on("connection", (ws) => {
 
         try {
             dados = JSON.parse(message.toString());
-        } catch (erro) {
+        } catch {
 
             ws.send(JSON.stringify({
                 tipo: "erro",
@@ -129,7 +126,7 @@ wss.on("connection", (ws) => {
 
             const codigo = dados.codigo;
 
-            if (!codigo || !salas.has(codigo)) {
+            if (!salas.has(codigo)) {
 
                 ws.send(JSON.stringify({
                     tipo: "erro",
@@ -139,23 +136,9 @@ wss.on("connection", (ws) => {
                 return;
             }
 
-
             const sala = salas.get(codigo);
 
 
-            // Se já estiver em alguma sala
-            if (ws.sala !== null) {
-
-                ws.send(JSON.stringify({
-                    tipo: "erro",
-                    mensagem: "Você já está em uma sala"
-                }));
-
-                return;
-            }
-
-
-            // Sala cheia
             if (sala.jogadores.size >= 2) {
 
                 ws.send(JSON.stringify({
@@ -167,29 +150,42 @@ wss.on("connection", (ws) => {
             }
 
 
-            // Coloca jogador na sala
-            sala.jogadores.add(ws);
+            // ID do jogador
+            const jogador_id = proximoJogador++;
 
             ws.sala = codigo;
+            ws.jogador_id = jogador_id;
+
+
+            sala.jogadores.set(jogador_id, ws);
+
+
+            const numeroJogador = sala.jogadores.size;
+
 
             console.log(
-                "👤 Jogador entrou na sala:",
-                codigo,
-                "| Jogadores:",
-                sala.jogadores.size
+                `🚗 Jogador ${numeroJogador} entrou na sala ${codigo}`
             );
 
 
-            // Confirma para esse jogador
+            // Avisar quem acabou de entrar
             ws.send(JSON.stringify({
                 tipo: "entrou_sala",
                 codigo: codigo,
-                jogadores: sala.jogadores.size
+                jogador_id: jogador_id,
+                numero: numeroJogador
             }));
 
 
             // ==========================
-            // DOIS JOGADORES
+            // AVISAR TODOS SOBRE OS JOGADORES
+            // ==========================
+
+            enviarListaJogadores(sala);
+
+
+            // ==========================
+            // SALA PRONTA
             // ==========================
 
             if (sala.jogadores.size === 2) {
@@ -199,71 +195,142 @@ wss.on("connection", (ws) => {
                     codigo
                 );
 
-                const mensagem = JSON.stringify({
-                    tipo: "sala_pronta",
-                    codigo: codigo
-                });
+
+                for (const jogador of sala.jogadores.values()) {
+
+                    jogador.send(JSON.stringify({
+                        tipo: "sala_pronta",
+                        codigo: codigo
+                    }));
+                }
+            }
+        }
 
 
-                // Avisa os DOIS jogadores
-                for (const jogador of sala.jogadores) {
+        // ==========================
+        // MOVIMENTO
+        // ==========================
 
-                    if (jogador.readyState === WebSocket.OPEN) {
-                        jogador.send(mensagem);
-                    }
+        if (dados.tipo === "movimento") {
+
+            if (ws.sala === null) {
+                return;
+            }
+
+            if (!salas.has(ws.sala)) {
+                return;
+            }
+
+            const sala = salas.get(ws.sala);
+
+
+            const mensagem = JSON.stringify({
+                tipo: "movimento",
+                jogador_id: ws.jogador_id,
+                x: dados.x,
+                y: dados.y,
+                rotacao: dados.rotacao
+            });
+
+
+            // Enviar para os outros jogadores
+            for (const [id, jogador] of sala.jogadores) {
+
+                if (
+                    id !== ws.jogador_id &&
+                    jogador.readyState === WebSocket.OPEN
+                ) {
+
+                    jogador.send(mensagem);
                 }
             }
         }
     });
 
 
-    // ==============================
-    // JOGADOR DESCONECTOU
-    // ==============================
+    // ==========================
+    // DESCONECTOU
+    // ==========================
 
     ws.on("close", () => {
 
-        console.log("❌ WebSocket desconectado");
+        console.log("❌ Jogador desconectou");
+
 
         if (ws.sala === null) {
             return;
         }
 
-        const codigo = ws.sala;
 
-        if (!salas.has(codigo)) {
+        if (!salas.has(ws.sala)) {
             return;
         }
 
-        const sala = salas.get(codigo);
 
-        sala.jogadores.delete(ws);
-
-        console.log(
-            "👤 Jogador saiu:",
-            codigo,
-            "| Restantes:",
-            sala.jogadores.size
-        );
+        const sala = salas.get(ws.sala);
 
 
-        // Se ficou vazia, apaga a sala
+        sala.jogadores.delete(ws.jogador_id);
+
+
+        enviarListaJogadores(sala);
+
+
         if (sala.jogadores.size === 0) {
 
-            salas.delete(codigo);
+            salas.delete(ws.sala);
 
             console.log(
                 "🗑️ Sala removida:",
-                codigo
+                ws.sala
             );
         }
     });
 });
 
 
-// ==============================
-// ROTA PRINCIPAL
-// ==============================
+// ==========================
+// ENVIAR LISTA
+// ==========================
+
+function enviarListaJogadores(sala) {
+
+    const jogadores = [];
+
+
+    let numero = 1;
+
+
+    for (const [id, ws] of sala.jogadores) {
+
+        jogadores.push({
+            id: id,
+            nome: "Player " + numero
+        });
+
+        numero++;
+    }
+
+
+    const mensagem = JSON.stringify({
+        tipo: "jogadores",
+        jogadores: jogadores
+    });
+
+
+    for (const ws of sala.jogadores.values()) {
+
+        if (ws.readyState === WebSocket.OPEN) {
+
+            ws.send(mensagem);
+        }
+    }
+}
+
+
+// ==========================
+// SITE
+// ==========================
 
 app.get("/", (req, res) => {
 
@@ -273,19 +340,15 @@ app.get("/", (req, res) => {
 });
 
 
-// ==============================
+// ==========================
 // PORTA
-// ==============================
+// ==========================
 
 const PORT = process.env.PORT || 3000;
 
 server.listen(PORT, "0.0.0.0", () => {
 
     console.log(
-        `🚀 Rocket Brasil Server rodando na porta ${PORT}!`
-    );
-
-    console.log(
-        "🔌 WebSocket disponível!"
+        `🚀 Servidor rodando na porta ${PORT}`
     );
 });
