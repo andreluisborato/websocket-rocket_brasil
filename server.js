@@ -4,11 +4,19 @@ const http = require("http");
 const WebSocket = require("ws");
 
 const app = express();
+
 app.use(cors());
 app.use(express.json());
 
 const server = http.createServer(app);
-const wss = new WebSocket.Server({ server });
+
+const wss = new WebSocket.Server({
+    server: server
+});
+
+// ==============================
+// SALAS
+// ==============================
 
 const salas = new Map();
 
@@ -22,21 +30,20 @@ function gerarCodigo() {
     return codigo;
 }
 
-// Página de teste
-app.get("/", (req, res) => {
-    res.send("Rocket Brasil WebSocket ONLINE 🚀");
-});
 
-// Criar sala
+// ==============================
+// CRIAR SALA
+// ==============================
+
 app.post("/criar-sala", (req, res) => {
+
     const codigo = gerarCodigo();
 
     salas.set(codigo, {
-        jogadores: [],
-        sockets: []
+        jogadores: new Set()
     });
 
-    console.log("Sala criada:", codigo);
+    console.log("🎮 Sala criada:", codigo);
 
     res.json({
         sucesso: true,
@@ -44,124 +51,241 @@ app.post("/criar-sala", (req, res) => {
     });
 });
 
-// Entrar em sala
+
+// ==============================
+// VERIFICAR / ENTRAR NA SALA
+// ==============================
+
 app.post("/entrar-sala", (req, res) => {
+
     const codigo = req.body.codigo;
 
-    const sala = salas.get(codigo);
+    if (!codigo) {
+        return res.json({
+            sucesso: false,
+            mensagem: "Código não informado"
+        });
+    }
 
-    if (!sala) {
+    if (!salas.has(codigo)) {
         return res.json({
             sucesso: false,
             mensagem: "Sala não encontrada"
         });
     }
 
-    if (sala.sockets.length >= 2) {
+    const sala = salas.get(codigo);
+
+    if (sala.jogadores.size >= 2) {
         return res.json({
             sucesso: false,
             mensagem: "Sala cheia"
         });
     }
 
+    console.log("🔎 Sala encontrada:", codigo);
+
+    // A entrada real será feita pelo WebSocket.
     res.json({
         sucesso: true,
         codigo: codigo
     });
 });
 
-// WebSocket
-wss.on("connection", (socket) => {
-    console.log("Novo jogador conectado!");
 
-    socket.on("message", (message) => {
+// ==============================
+// WEBSOCKET
+// ==============================
+
+wss.on("connection", (ws) => {
+
+    console.log("🔌 Novo WebSocket conectado");
+
+    ws.sala = null;
+
+
+    ws.on("message", (message) => {
+
+        let dados;
+
         try {
-            const dados = JSON.parse(message);
+            dados = JSON.parse(message.toString());
+        } catch (erro) {
 
-            // Jogador entra no WebSocket de uma sala
-            if (dados.tipo === "entrar_sala") {
+            ws.send(JSON.stringify({
+                tipo: "erro",
+                mensagem: "Mensagem inválida"
+            }));
 
-                const codigo = dados.codigo;
-                const sala = salas.get(codigo);
+            return;
+        }
 
-                if (!sala) {
-                    socket.send(JSON.stringify({
-                        tipo: "erro",
-                        mensagem: "Sala não encontrada"
-                    }));
 
-                    return;
-                }
+        // ==========================
+        // ENTRAR NA SALA
+        // ==========================
 
-                if (sala.sockets.length >= 2) {
-                    socket.send(JSON.stringify({
-                        tipo: "erro",
-                        mensagem: "Sala cheia"
-                    }));
+        if (dados.tipo === "entrar_sala") {
 
-                    return;
-                }
+            const codigo = dados.codigo;
 
-                sala.sockets.push(socket);
+            if (!codigo || !salas.has(codigo)) {
 
-                socket.sala = codigo;
+                ws.send(JSON.stringify({
+                    tipo: "erro",
+                    mensagem: "Sala não encontrada"
+                }));
+
+                return;
+            }
+
+
+            const sala = salas.get(codigo);
+
+
+            // Se já estiver em alguma sala
+            if (ws.sala !== null) {
+
+                ws.send(JSON.stringify({
+                    tipo: "erro",
+                    mensagem: "Você já está em uma sala"
+                }));
+
+                return;
+            }
+
+
+            // Sala cheia
+            if (sala.jogadores.size >= 2) {
+
+                ws.send(JSON.stringify({
+                    tipo: "erro",
+                    mensagem: "Sala cheia"
+                }));
+
+                return;
+            }
+
+
+            // Coloca jogador na sala
+            sala.jogadores.add(ws);
+
+            ws.sala = codigo;
+
+            console.log(
+                "👤 Jogador entrou na sala:",
+                codigo,
+                "| Jogadores:",
+                sala.jogadores.size
+            );
+
+
+            // Confirma para esse jogador
+            ws.send(JSON.stringify({
+                tipo: "entrou_sala",
+                codigo: codigo,
+                jogadores: sala.jogadores.size
+            }));
+
+
+            // ==========================
+            // DOIS JOGADORES
+            // ==========================
+
+            if (sala.jogadores.size === 2) {
 
                 console.log(
-                    "Jogador entrou na sala:",
+                    "🔥 SALA PRONTA:",
                     codigo
                 );
 
-                // Avisar o jogador que entrou
-                socket.send(JSON.stringify({
-                    tipo: "entrou_sala",
+                const mensagem = JSON.stringify({
+                    tipo: "sala_pronta",
                     codigo: codigo
-                }));
+                });
 
-                // Se já existem 2 jogadores
-                if (sala.sockets.length === 2) {
 
-                    console.log(
-                        "Sala pronta:",
-                        codigo
-                    );
+                // Avisa os DOIS jogadores
+                for (const jogador of sala.jogadores) {
 
-                    sala.sockets.forEach((player) => {
-                        player.send(JSON.stringify({
-                            tipo: "sala_pronta"
-                        }));
-                    });
+                    if (jogador.readyState === WebSocket.OPEN) {
+                        jogador.send(mensagem);
+                    }
                 }
             }
-        } catch (erro) {
-            console.log("Mensagem inválida:", erro);
         }
     });
 
-    socket.on("close", () => {
 
-        const codigo = socket.sala;
+    // ==============================
+    // JOGADOR DESCONECTOU
+    // ==============================
 
-        if (!codigo) return;
+    ws.on("close", () => {
+
+        console.log("❌ WebSocket desconectado");
+
+        if (ws.sala === null) {
+            return;
+        }
+
+        const codigo = ws.sala;
+
+        if (!salas.has(codigo)) {
+            return;
+        }
 
         const sala = salas.get(codigo);
 
-        if (!sala) return;
-
-        sala.sockets = sala.sockets.filter(
-            (player) => player !== socket
-        );
+        sala.jogadores.delete(ws);
 
         console.log(
-            "Jogador saiu da sala:",
-            codigo
+            "👤 Jogador saiu:",
+            codigo,
+            "| Restantes:",
+            sala.jogadores.size
         );
+
+
+        // Se ficou vazia, apaga a sala
+        if (sala.jogadores.size === 0) {
+
+            salas.delete(codigo);
+
+            console.log(
+                "🗑️ Sala removida:",
+                codigo
+            );
+        }
     });
 });
+
+
+// ==============================
+// ROTA PRINCIPAL
+// ==============================
+
+app.get("/", (req, res) => {
+
+    res.send(
+        "🚀 Rocket Brasil Server ONLINE!"
+    );
+});
+
+
+// ==============================
+// PORTA
+// ==============================
 
 const PORT = process.env.PORT || 3000;
 
 server.listen(PORT, "0.0.0.0", () => {
+
     console.log(
-        `🚀 Rocket Brasil Server rodando na porta ${PORT}`
+        `🚀 Rocket Brasil Server rodando na porta ${PORT}!`
+    );
+
+    console.log(
+        "🔌 WebSocket disponível!"
     );
 });
